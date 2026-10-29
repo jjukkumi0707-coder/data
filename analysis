@@ -1,0 +1,1152 @@
+
+# ============================================================
+# EDU200 의료비 지출 특성 분석 - 최종 제출용 통합 코드
+#
+# 분석 내용
+# 1. CSV 불러오기 및 데이터 검증
+# 2. 의료비 기초통계
+# 3. 의료비 히스토그램
+# 4. 로그변환 의료비 분포
+# 5. 진료유형별 통계
+# 6. 입원·외래 박스플롯
+# 7. 연령대별 의료비 분석
+# 8. 연령대별 그래프 2개
+# 9. p-value 검정
+# 10. 결과 CSV / PNG / ZIP 저장
+# ============================================================
+
+import sys
+import subprocess
+import zipfile
+from pathlib import Path
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+
+from matplotlib.ticker import StrMethodFormatter
+from scipy.stats import mannwhitneyu, kruskal, spearmanr
+from IPython.display import display
+
+print("===== EDU200 파이널5 의료비 EDA 시작 =====")
+
+# ------------------------------------------------------------
+# STEP 1. 한글 폰트 준비
+# ------------------------------------------------------------
+
+font_path = Path(
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
+)
+
+if not font_path.exists():
+    print("한글 폰트 설치 중...")
+    subprocess.run(
+        ["apt-get", "update", "-qq"],
+        check=True,
+        stdout=subprocess.DEVNULL
+    )
+    subprocess.run(
+        ["apt-get", "install", "-y", "-qq", "fonts-nanum"],
+        check=True,
+        stdout=subprocess.DEVNULL
+    )
+
+# 그래프별로 실제 한글 폰트를 적용
+font = fm.FontProperties(fname=str(font_path))
+
+plt.rcParams["axes.unicode_minus"] = False
+plt.rcParams["figure.dpi"] = 100
+
+NAVY = "#23385F"
+BLUE = "#3976B4"
+
+def finish_chart(ax, filename):
+    """한글 글꼴 적용 및 그래프 저장"""
+    ax.title.set_fontproperties(font)
+    ax.xaxis.label.set_fontproperties(font)
+    ax.yaxis.label.set_fontproperties(font)
+
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        label.set_fontproperties(font)
+
+    ax.grid(axis="y", alpha=0.18)
+    ax.set_axisbelow(True)
+
+    plt.tight_layout()
+    plt.savefig(out / filename, dpi=180, bbox_inches="tight")
+    plt.show()
+    plt.close()
+
+print("한글 폰트 준비 완료")
+
+# ------------------------------------------------------------
+# STEP 2. 사용할 CSV 파일 지정
+# ------------------------------------------------------------
+
+filename = "edu200_processed_final (5).csv"
+
+paths = [
+    Path("/content") / filename,
+    Path("/") / filename
+]
+
+source = next((p for p in paths if p.is_file()), None)
+
+if source is None:
+    print("현재 업로드된 파일:")
+    for p in Path("/content").glob("*.csv"):
+        print("-", p.name)
+
+    raise FileNotFoundError(
+        f"{filename} 파일을 코랩에 업로드하세요."
+    )
+
+print("사용 파일:", source)
+
+# ------------------------------------------------------------
+# STEP 3. 필요한 변수만 읽기
+# ------------------------------------------------------------
+
+required = [
+    "RVD_RPE_TAMT_AMT",
+    "FOM_TP_CD",
+    "PAT_AGE"
+]
+
+raw = pd.read_csv(
+    source,
+    dtype="string",
+    usecols=required,
+    encoding="utf-8-sig"
+)
+
+raw.columns = raw.columns.str.strip()
+
+# 비용 및 연령 숫자 변환
+for column in ["RVD_RPE_TAMT_AMT", "PAT_AGE"]:
+    raw[column] = pd.to_numeric(
+        raw[column]
+        .str.replace(",", "", regex=False)
+        .str.strip(),
+        errors="coerce"
+    )
+
+# 의료비 결측 및 음수 제외
+data = raw.loc[
+    raw["RVD_RPE_TAMT_AMT"].notna()
+    & raw["RVD_RPE_TAMT_AMT"].ge(0)
+].copy()
+
+data["의료비"] = data["RVD_RPE_TAMT_AMT"]
+
+if data.empty:
+    raise ValueError("분석 가능한 의료비 데이터가 없습니다.")
+
+print("\n===== 데이터 확인 =====")
+print("원본 건수:", f"{len(raw):,}")
+print("분석 건수:", f"{len(data):,}")
+print("제외 건수:", f"{len(raw)-len(data):,}")
+
+# 결과 저장 폴더
+out = Path("/content/EDU200_파이널5_EDA_결과")
+out.mkdir(parents=True, exist_ok=True)
+# 이전 실행의 산출물이 남아있다면 이번 결과와 섞이지 않도록 제거
+for old_file in out.glob("*.png"):
+    old_file.unlink()
+for old_file in out.glob("*.csv"):
+    old_file.unlink()
+
+# ------------------------------------------------------------
+# STEP 4. 의료비 기초통계
+# ------------------------------------------------------------
+
+print("\n[1] 의료비 기초통계")
+
+stats = data["의료비"].describe(
+    percentiles=[.25, .5, .75, .90, .95, .99]
+)
+
+stats_table = stats.rename({
+    "count": "건수",
+    "mean": "평균",
+    "std": "표준편차",
+    "min": "최솟값",
+    "25%": "25백분위",
+    "50%": "중앙값",
+    "75%": "75백분위",
+    "90%": "90백분위",
+    "95%": "95백분위",
+    "99%": "99백분위",
+    "max": "최댓값"
+}).reset_index()
+
+stats_table.columns = ["통계항목", "값"]
+
+display(
+    stats_table.style
+    .format({"값": "{:,.2f}"})
+    .hide(axis="index")
+)
+
+stats_table.to_csv(
+    out / "01_의료비_기초통계.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+# ------------------------------------------------------------
+# STEP 5. 의료비 히스토그램
+# ------------------------------------------------------------
+
+print("\n[2] 의료비 히스토그램")
+
+p99 = data["의료비"].quantile(0.99)
+
+# 그래프에서는 99백분위 이하만 표시
+# 기초통계와 다른 검정에는 전체 유효 데이터를 사용
+plot_cost = data.loc[
+    data["의료비"] <= p99, "의료비"
+].to_numpy(dtype=float)
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+ax.hist(
+    plot_cost,
+    bins=50,
+    color=BLUE,
+    edgecolor="white",
+    linewidth=0.3
+)
+
+ax.set_title("의료비 지출 분포", fontsize=15)
+ax.set_xlabel("의료비(원)", fontsize=12)
+ax.set_ylabel("청구 건수(건)", fontsize=12)
+ax.xaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+ax.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+
+finish_chart(ax, "02_의료비_히스토그램.png")
+
+# ------------------------------------------------------------
+# STEP 6. 로그변환 의료비 분포
+# ------------------------------------------------------------
+
+print("\n[3] 로그변환 의료비 분포")
+
+log_cost = np.log1p(
+    data["의료비"].to_numpy(dtype=float)
+)
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+ax.hist(
+    log_cost,
+    bins=50,
+    color=BLUE,
+    edgecolor="white",
+    linewidth=0.3
+)
+
+ax.set_title("로그변환 의료비 분포", fontsize=15)
+ax.set_xlabel("로그변환 의료비(log(1 + 의료비))", fontsize=12)
+ax.set_ylabel("청구 건수(건)", fontsize=12)
+ax.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+
+finish_chart(ax, "03_의료비_로그분포.png")
+
+# ------------------------------------------------------------
+# STEP 7. 진료유형별 의료비 통계
+# ------------------------------------------------------------
+
+print("\n[4] 진료유형별 의료비 통계")
+
+codes = (
+    data["FOM_TP_CD"]
+    .str.strip()
+    .str.replace(r"\.0$", "", regex=True)
+    .str.zfill(3)
+)
+
+# 의과 입원과 외래 코드 구분
+data["진료유형"] = codes.map({
+    "021": "의과 입원",
+    "031": "의과 외래"
+}).fillna("기타 서식")
+
+group = (
+    data.groupby("진료유형")
+    .agg(
+        건수=("의료비", "count"),
+        평균의료비=("의료비", "mean"),
+        중앙값=("의료비", "median"),
+        총의료비=("의료비", "sum")
+    )
+    .reset_index()
+)
+
+display(
+    group.style
+    .format({
+        "건수": "{:,.0f}",
+        "평균의료비": "{:,.0f}",
+        "중앙값": "{:,.0f}",
+        "총의료비": "{:,.0f}"
+    })
+    .hide(axis="index")
+)
+
+group.to_csv(
+    out / "04_진료유형별_의료비.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+# ------------------------------------------------------------
+# STEP 8. 입원·외래 박스플롯
+# ------------------------------------------------------------
+
+print("\n[5] 입원·외래 박스플롯")
+
+box_values = []
+box_labels = []
+
+for t, label in [
+    ("의과 입원", "입원"),
+    ("의과 외래", "외래")
+]:
+    values = data.loc[
+        data["진료유형"] == t, "의료비"
+    ]
+
+    if not values.empty:
+        # 그래프에만 최대 5천 건 표본 사용
+        sample = values.sample(
+            n=min(len(values), 5000),
+            random_state=42
+        )
+
+        box_values.append(
+            np.log1p(sample.to_numpy(dtype=float))
+        )
+        box_labels.append(label)
+
+if len(box_values) == 2:
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    ax.boxplot(
+        box_values,
+        tick_labels=box_labels,
+        showfliers=False,
+        patch_artist=True,
+        boxprops={"facecolor": "#DDE6F2"},
+        medianprops={"color": "#C4682A", "linewidth": 2}
+    )
+
+    ax.set_title("입원·외래 의료비 분포 비교", fontsize=15)
+    ax.set_xlabel("진료유형", fontsize=12)
+    ax.set_ylabel(
+        "로그변환 의료비(log(1 + 의료비))",
+        fontsize=12
+    )
+
+    finish_chart(ax, "05_입원외래_박스플롯.png")
+
+else:
+    print("입원과 외래 데이터가 모두 없어 박스플롯 생략")
+
+# ------------------------------------------------------------
+# STEP 9. 연령대별 분석 데이터 준비
+# ------------------------------------------------------------
+
+print("\n[6] 연령대별 의료비 분석")
+
+age_data = data.loc[
+    data["PAT_AGE"].between(20, 79)
+].copy()
+
+age_data["연령대숫자"] = (
+    age_data["PAT_AGE"] // 10 * 10
+).astype(int)
+
+age_data["연령대"] = (
+    age_data["연령대숫자"].astype(str) + "대"
+)
+
+# 전체 의료비 데이터의 상위 10% 기준
+high_cut = data["의료비"].quantile(0.90)
+
+age_data["고액여부"] = (
+    age_data["의료비"] >= high_cut
+).astype(int)
+
+print("고액 의료비 기준:", f"{high_cut:,.0f}원")
+print("20~70대 분석 건수:", f"{len(age_data):,}")
+
+age_result = (
+    age_data.groupby(["연령대숫자", "연령대"])
+    .agg(
+        진료건수=("의료비", "count"),
+        평균의료비=("의료비", "mean"),
+        중앙값=("의료비", "median"),
+        총의료비=("의료비", "sum"),
+        고액건수=("고액여부", "sum")
+    )
+    .reset_index()
+    .sort_values("연령대숫자")
+)
+
+age_result["고액비율(%)"] = (
+    age_result["고액건수"]
+    / age_result["진료건수"] * 100
+)
+
+age_result = age_result.drop(columns="연령대숫자")
+
+display(
+    age_result.style
+    .format({
+        "진료건수": "{:,.0f}",
+        "평균의료비": "{:,.0f}",
+        "중앙값": "{:,.0f}",
+        "총의료비": "{:,.0f}",
+        "고액건수": "{:,.0f}",
+        "고액비율(%)": "{:.2f}%"
+    })
+    .hide(axis="index")
+)
+
+age_result.to_csv(
+    out / "06_연령대별_의료비_통계.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+# ------------------------------------------------------------
+# STEP 10. 연령대별 평균 의료비 그래프
+# ------------------------------------------------------------
+
+print("\n[7] 연령대별 평균 의료비 그래프")
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+bars = ax.bar(
+    age_result["연령대"],
+    age_result["평균의료비"],
+    color=BLUE,
+    width=0.65
+)
+
+ax.set_title("연령대별 평균 의료비", fontsize=15)
+ax.set_xlabel("연령대", fontsize=12)
+ax.set_ylabel("평균 의료비(원)", fontsize=12)
+
+ax.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
+
+ax.bar_label(
+    bars,
+    labels=[
+        f"{v:,.0f}"
+        for v in age_result["평균의료비"]
+    ],
+    padding=3,
+    fontsize=9
+)
+
+ax.set_ylim(
+    0,
+    max(age_result["평균의료비"]) * 1.2
+)
+
+finish_chart(ax, "07_연령대별_평균의료비.png")
+
+# ------------------------------------------------------------
+# STEP 11. 연령대별 고액 의료비 비율
+# ------------------------------------------------------------
+
+print("\n[8] 연령대별 고액 의료비 비율")
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+bars = ax.bar(
+    age_result["연령대"],
+    age_result["고액비율(%)"],
+    color=BLUE,
+    width=0.65
+)
+
+ax.set_title("연령대별 고액 의료비 비율", fontsize=15)
+ax.set_xlabel("연령대", fontsize=12)
+ax.set_ylabel("고액 의료비 비율(%)", fontsize=12)
+
+ax.bar_label(
+    bars,
+    labels=[
+        f"{v:.2f}%"
+        for v in age_result["고액비율(%)"]
+    ],
+    padding=3,
+    fontsize=9
+)
+
+ax.set_ylim(
+    0,
+    max(age_result["고액비율(%)"]) * 1.2
+)
+
+finish_chart(ax, "08_연령대별_고액의료비비율.png")
+
+# ------------------------------------------------------------
+# STEP 12. p-value 통계검정
+# ------------------------------------------------------------
+
+print("\n[9] p-value 통계검정")
+
+results = []
+
+def add_test(name, method, statistic, p):
+    results.append({
+        "분석항목": name,
+        "검정방법": method,
+        "검정통계량": statistic,
+        "p-value": p,
+        "p-value 표시": (
+            "p < 0.001" if p < 0.001
+            else f"p = {p:.4f}"
+        ),
+        "통계적 유의성": (
+            "유의" if p < 0.05
+            else "유의하지 않음"
+        )
+    })
+
+# 입원·외래 비교
+inpatient = data.loc[
+    data["진료유형"] == "의과 입원", "의료비"
+].to_numpy(dtype=float)
+
+outpatient = data.loc[
+    data["진료유형"] == "의과 외래", "의료비"
+].to_numpy(dtype=float)
+
+if len(inpatient) > 0 and len(outpatient) > 0:
+    u, p = mannwhitneyu(
+        inpatient,
+        outpatient,
+        alternative="two-sided",
+        method="asymptotic"
+    )
+    add_test(
+        "입원·외래 의료비 차이",
+        "Mann-Whitney U",
+        u, p
+    )
+
+# 연령대별 차이
+age_groups = [
+    g["의료비"].to_numpy(dtype=float)
+    for _, g in age_data.groupby("연령대숫자")
+    if len(g) >= 2
+]
+
+if len(age_groups) >= 2:
+    h, p = kruskal(*age_groups)
+
+    add_test(
+        "연령대별 의료비 차이",
+        "Kruskal-Wallis",
+        h, p
+    )
+
+# 연령과 의료비 순위상관
+corr_data = data.loc[
+    data["PAT_AGE"].between(0, 110)
+].dropna(subset=["PAT_AGE", "의료비"])
+
+if (
+    len(corr_data) >= 3
+    and corr_data["PAT_AGE"].nunique() >= 2
+    and corr_data["의료비"].nunique() >= 2
+):
+    rho, p = spearmanr(
+        corr_data["PAT_AGE"],
+        corr_data["의료비"]
+    )
+
+    add_test(
+        "연령과 의료비 상관관계",
+        "Spearman",
+        rho, p
+    )
+
+p_result = pd.DataFrame(results)
+
+display(
+    p_result.style
+    .format({"검정통계량": "{:,.4f}"})
+    .hide(axis="index")
+)
+
+p_result.to_csv(
+    out / "09_의료비_pvalue_검정결과.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+# ------------------------------------------------------------
+# STEP 13. 데이터 검증 결과
+# ------------------------------------------------------------
+
+print("\n[10] 최종 데이터 점검")
+
+print("전체 분석 건수:", f"{len(data):,}")
+print("연령대 분석 건수:", f"{len(age_data):,}")
+print("입원 검정 건수:", f"{len(inpatient):,}")
+print("외래 검정 건수:", f"{len(outpatient):,}")
+print("의료비 최댓값:", f"{data['의료비'].max():,.0f}원")
+
+maximum = data["의료비"].max()
+max_count = (data["의료비"] == maximum).sum()
+
+print("최댓값과 동일한 명세서 수:", f"{max_count:,}")
+
+if max_count > 100:
+    print(
+        "주의: 최댓값에 많은 명세서가 집중되어 있습니다."
+    )
+    print(
+        "원본 데이터나 전처리 과정의 상한 처리 여부를 확인하세요."
+    )
+
+# ------------------------------------------------------------
+# STEP 14. 제출 파일 ZIP 저장
+# ------------------------------------------------------------
+
+print("\n===== 모든 분석 완료 =====")
+
+zip_path = Path("/edu200_processed_final (5).csv")
+
+with zipfile.ZipFile(
+    zip_path, "w", zipfile.ZIP_DEFLATED
+) as z:
+    for file in sorted(out.iterdir()):
+        if file.is_file():
+            z.write(file, arcname=file.name)
+
+print("결과 폴더:", out)
+print("압축 파일:", zip_path)
+
+print("\n생성된 파일:")
+for p in sorted(out.iterdir()):
+    print(" -", p.name)
+
+print("\n===== 저장 완료 =====")
+
+
+# =====================================================
+# EDU200 문제 2 - 의료비 관련 요인 탐색
+#
+# 1. 연령대 × 진료유형 교차분석
+# 2. 고액 의료비 집단의 공통 특성 분석
+# 3. 분석 결과 자동 해석
+# 4. 그래프 / CSV / TXT / ZIP 저장
+# =====================================================
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+from matplotlib.ticker import StrMethodFormatter
+from pathlib import Path
+import zipfile
+import subprocess
+from IPython.display import display
+
+print("===== 문제 2 분석 시작 =====")
+
+# -----------------------------------------------------
+# STEP 1. 분석할 CSV 파일
+# -----------------------------------------------------
+
+file = Path("/content/edu200_processed_final (5).csv")
+
+if not file.exists():
+    raise FileNotFoundError(
+        "edu200_processed_final (5).csv를 업로드하세요."
+    )
+
+cols = [
+    "PAT_AGE",
+    "FOM_TP_CD",
+    "CL_CD",
+    "RVD_RPE_TAMT_AMT"
+]
+
+df2 = pd.read_csv(
+    file,
+    usecols=cols,
+    dtype="string",
+    encoding="utf-8-sig"
+)
+
+print("원본 건수:", f"{len(df2):,}")
+
+# -----------------------------------------------------
+# STEP 2. 분석 데이터 준비
+# -----------------------------------------------------
+
+# 의료비와 연령 숫자 변환
+for col in ["PAT_AGE", "RVD_RPE_TAMT_AMT"]:
+    df2[col] = pd.to_numeric(
+        df2[col].str.replace(",", "", regex=False),
+        errors="coerce"
+    )
+
+# 의료비가 없는 건 또는 음수 제외
+df2 = df2.loc[
+    df2["RVD_RPE_TAMT_AMT"].notna()
+    & df2["RVD_RPE_TAMT_AMT"].ge(0)
+].copy()
+
+df2["의료비"] = df2["RVD_RPE_TAMT_AMT"]
+
+# 연령대 만들기
+# PAT_AGE는 5단위 기록이므로 10단위로 그룹화
+df2["연령대숫자"] = (
+    df2["PAT_AGE"] // 10 * 10
+).astype("Int64")
+
+df2["연령대"] = (
+    df2["연령대숫자"].astype("string") + "대"
+)
+
+# 진료유형 코드 정리
+codes = (
+    df2["FOM_TP_CD"]
+    .str.strip()
+    .str.replace(r"\.0$", "", regex=True)
+    .str.zfill(3)
+)
+
+df2["진료유형"] = codes.map({
+    "021": "의과 입원",
+    "031": "의과 외래"
+}).fillna("기타 서식")
+
+# 의료기관 종별 코드
+df2["의료기관코드"] = (
+    df2["CL_CD"].str.strip().fillna("미상")
+)
+
+# 고액 의료비 정의
+cutoff = df2["의료비"].quantile(0.90)
+
+df2["고액여부"] = (
+    df2["의료비"] >= cutoff
+).astype(int)
+
+print("분석 건수:", f"{len(df2):,}")
+print("고액 의료비 기준:", f"{cutoff:,.0f}원")
+
+# -----------------------------------------------------
+# STEP 3. 결과 저장 폴더
+# -----------------------------------------------------
+
+out = Path("/content/EDU200_문제2_최종분석")
+out.mkdir(exist_ok=True)
+
+# -----------------------------------------------------
+# STEP 4. 한글 폰트
+# -----------------------------------------------------
+
+font_file = Path(
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf"
+)
+
+if not font_file.exists():
+    subprocess.run(
+        ["apt-get", "install", "-y", "-qq", "fonts-nanum"],
+        check=True,
+        stdout=subprocess.DEVNULL
+    )
+
+fm.fontManager.addfont(str(font_file))
+font_name = fm.FontProperties(
+    fname=str(font_file)
+).get_name()
+
+plt.rcParams["font.family"] = font_name
+plt.rcParams["axes.unicode_minus"] = False
+
+# -----------------------------------------------------
+# STEP 5. 연령대 × 진료유형 교차분석
+# -----------------------------------------------------
+
+print("\n[1] 연령대 × 진료유형 교차분석")
+
+cross = (
+    df2.dropna(subset=["연령대"])
+    .groupby(["연령대숫자", "연령대", "진료유형"])
+    .agg(
+        청구건수=("의료비", "size"),
+        평균의료비=("의료비", "mean"),
+        중앙값=("의료비", "median"),
+        고액건수=("고액여부", "sum")
+    )
+    .reset_index()
+    .sort_values(["연령대숫자", "진료유형"])
+)
+
+cross["고액비율(%)"] = (
+    cross["고액건수"] / cross["청구건수"] * 100
+)
+
+cross = cross.drop(columns="연령대숫자")
+
+display(
+    cross.style.format({
+        "청구건수": "{:,.0f}",
+        "평균의료비": "{:,.0f}",
+        "중앙값": "{:,.0f}",
+        "고액건수": "{:,.0f}",
+        "고액비율(%)": "{:.2f}%"
+    }).hide(axis="index")
+)
+
+cross.to_csv(
+    out / "01_연령대_진료유형_교차분석.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+# -----------------------------------------------------
+# STEP 6. 평균 의료비 히트맵
+# -----------------------------------------------------
+
+print("\n[2] 평균 의료비 히트맵")
+
+# 입원·외래만 표시
+plot_cross = cross[
+    cross["진료유형"].isin(["의과 입원", "의과 외래"])
+]
+
+heat = plot_cross.pivot(
+    index="연령대",
+    columns="진료유형",
+    values="평균의료비"
+)
+
+heat = heat.reindex(
+    columns=["의과 입원", "의과 외래"]
+)
+
+heat = heat.reindex(
+    sorted(heat.index, key=lambda x: int(x.replace("대", "")))
+)
+
+fig, ax = plt.subplots(figsize=(9, 6))
+
+values = heat.to_numpy(dtype=float)
+masked = np.ma.masked_invalid(values)
+
+im = ax.imshow(masked, cmap="Blues", aspect="auto")
+
+ax.set_xticks(range(len(heat.columns)))
+ax.set_xticklabels(heat.columns)
+
+ax.set_yticks(range(len(heat.index)))
+ax.set_yticklabels(heat.index)
+
+for i in range(len(heat.index)):
+    for j in range(len(heat.columns)):
+        value = values[i, j]
+        if np.isfinite(value):
+            ax.text(
+                j, i,
+                f"{value:,.0f}원",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color=(
+                    "white"
+                    if value > np.nanmax(values) * 0.65
+                    else "#202020"
+                )
+            )
+
+ax.set_title("연령대 × 진료유형별 평균 의료비", fontsize=15)
+ax.set_xlabel("진료유형")
+ax.set_ylabel("연령대")
+
+cbar = fig.colorbar(im, ax=ax)
+cbar.set_label("평균 의료비(원)")
+
+plt.tight_layout()
+plt.savefig(
+    out / "02_연령대_진료유형_평균의료비_히트맵.png",
+    dpi=180,
+    bbox_inches="tight"
+)
+plt.show()
+plt.close()
+
+# -----------------------------------------------------
+# STEP 7. 고액 의료비 집단의 공통 특성 분석
+# -----------------------------------------------------
+
+print("\n[3] 고액 의료비 집단 특성 분석")
+
+combo = (
+    df2.dropna(subset=["연령대"])
+    .groupby(
+        ["연령대", "진료유형", "의료기관코드"]
+    )
+    .agg(
+        청구건수=("의료비", "size"),
+        평균의료비=("의료비", "mean"),
+        중앙값=("의료비", "median"),
+        고액건수=("고액여부", "sum")
+    )
+    .reset_index()
+)
+
+combo["고액비율(%)"] = (
+    combo["고액건수"] / combo["청구건수"] * 100
+)
+
+# 100건 미만 집단은 비율이 불안정할 수 있어
+# 비교 순위에서는 제외하되 원본 집계표에는 남김
+combo["비교대상여부"] = np.where(
+    combo["청구건수"] >= 100,
+    "비교대상",
+    "소규모 집단"
+)
+
+combo.to_csv(
+    out / "03_고액의료비_집단조합_전체.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+# 100건 이상 집단 중 비율 상위 15개
+ranked = (
+    combo[combo["청구건수"] >= 100]
+    .sort_values(
+        ["고액비율(%)", "청구건수"],
+        ascending=[False, False]
+    )
+    .head(15)
+    .copy()
+)
+
+print("\n고액 의료비 비율 상위 집단 15개")
+
+display(
+    ranked.style.format({
+        "청구건수": "{:,.0f}",
+        "평균의료비": "{:,.0f}",
+        "중앙값": "{:,.0f}",
+        "고액건수": "{:,.0f}",
+        "고액비율(%)": "{:.2f}%"
+    }).hide(axis="index")
+)
+
+ranked.to_csv(
+    out / "04_고액의료비비율_상위15개_집단.csv",
+    index=False,
+    encoding="utf-8-sig"
+)
+
+# -----------------------------------------------------
+# STEP 8. 고액 의료비 상위 집단 그래프
+# -----------------------------------------------------
+
+print("\n[4] 고액 의료비 집단 그래프")
+
+if not ranked.empty:
+
+    ranked = ranked.copy()
+
+    ranked["집단명"] = (
+        ranked["연령대"]
+        + " / "
+        + ranked["진료유형"]
+        + " / 기관 "
+        + ranked["의료기관코드"]
+    )
+
+    plot_rank = ranked.iloc[::-1]
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+
+    bars = ax.barh(
+        plot_rank["집단명"],
+        plot_rank["고액비율(%)"],
+        color="#3976B4"
+    )
+
+    ax.bar_label(
+        bars,
+        labels=[
+            f"{v:.1f}% (N={n:,})"
+            for v, n in zip(
+                plot_rank["고액비율(%)"],
+                plot_rank["청구건수"]
+            )
+        ],
+        padding=4,
+        fontsize=9
+    )
+
+    ax.set_xlim(
+        0,
+        max(plot_rank["고액비율(%)"]) * 1.35
+    )
+
+    ax.set_title(
+        "고액 의료비 비율 상위 집단",
+        fontsize=15
+    )
+
+    ax.set_xlabel("집단 내 고액 의료비 비율(%)")
+    ax.set_ylabel("연령대 / 진료유형 / 의료기관 종별코드")
+
+    ax.grid(axis="x", alpha=0.2)
+    ax.set_axisbelow(True)
+
+    plt.tight_layout()
+    plt.savefig(
+        out / "05_고액의료비_상위집단_그래프.png",
+        dpi=180,
+        bbox_inches="tight"
+    )
+    plt.show()
+    plt.close()
+
+# -----------------------------------------------------
+# STEP 9. 결과 및 해석 자동 요약
+# -----------------------------------------------------
+
+print("\n[5] 결과 및 해석")
+
+summary = []
+
+summary.append("EDU200 의료비 관련 요인 탐색")
+summary.append("=" * 45)
+
+summary.append(
+    f"분석 명세서 수: {len(df2):,}건"
+)
+
+summary.append(
+    f"고액 의료비 기준: {cutoff:,.0f}원 이상"
+)
+
+summary.append(
+    "고액 여부는 청구 건별 의료비의 전체 90백분위수로 정의함."
+)
+
+summary.append(
+    "분석 단위는 환자 수가 아니라 청구 명세서 건수임."
+)
+
+if not cross.empty:
+    # 표본이 100건 이상인 교차 집단에서 비교
+    valid_cross = cross[cross["청구건수"] >= 100]
+
+    if not valid_cross.empty:
+        top_mean = valid_cross.loc[
+            valid_cross["평균의료비"].idxmax()
+        ]
+
+        summary.append("")
+        summary.append("[연령대와 진료유형 교차분석]")
+
+        summary.append(
+            f"평균 의료비가 가장 높은 집단: "
+            f"{top_mean['연령대']} / {top_mean['진료유형']}"
+        )
+
+        summary.append(
+            f"평균 의료비: {top_mean['평균의료비']:,.0f}원"
+        )
+
+if not ranked.empty:
+    top_high = ranked.iloc[0]
+
+    summary.append("")
+    summary.append("[고액 의료비 집단 특성]")
+
+    summary.append(
+        f"고액 비율이 가장 높은 조합: "
+        f"{top_high['연령대']} / "
+        f"{top_high['진료유형']} / "
+        f"의료기관코드 {top_high['의료기관코드']}"
+    )
+
+    summary.append(
+        f"고액 의료비 비율: "
+        f"{top_high['고액비율(%)']:.2f}%"
+    )
+
+    summary.append(
+        f"해당 집단 청구 건수: "
+        f"{top_high['청구건수']:,}건"
+    )
+
+summary.append("")
+summary.append("[해석상 유의사항]")
+
+summary.append(
+    "1. 집단별 차이는 관련성을 보여주며 인과관계를 증명하지 않음."
+)
+
+summary.append(
+    "2. 100건 미만 집단은 상위 비율 순위에서 제외함."
+)
+
+summary.append(
+    "3. 의료기관 종별은 코드값이며 공식 코드표 확인이 필요함."
+)
+
+summary.append(
+    "4. 90백분위수와 동일 금액이 여러 건이면 "
+    "고액 집단 비율은 정확히 10%가 아닐 수 있음."
+)
+
+summary.append(
+    "5. 이전 p-value 결과는 동일한 분석 대상과 "
+    "검정 가정을 확인한 뒤 별도로 인용해야 함."
+)
+
+summary_text = "\n".join(summary)
+
+print(summary_text)
+
+(out / "06_문제2_결과및해석.txt").write_text(
+    summary_text,
+    encoding="utf-8"
+)
+
+# -----------------------------------------------------
+# STEP 10. ZIP 압축
+# -----------------------------------------------------
+
+zip_path = Path(
+    "/content/EDU200_문제2_최종분석.zip"
+)
+
+with zipfile.ZipFile(
+    zip_path, "w", zipfile.ZIP_DEFLATED
+) as z:
+    for p in sorted(out.iterdir()):
+        if p.is_file():
+            z.write(p, arcname=p.name)
+
+print("\n===== 문제 2 분석 완료 =====")
+print("저장 폴더:", out)
+print("ZIP 파일:", zip_path)
+
+for p in sorted(out.iterdir()):
+    print("저장:", p.name)
+
